@@ -1,0 +1,20 @@
+{
+  "clickupListId": "901802953947",
+  "globalNotifyUsers": ["khalid@k-brands.com"],
+  "folders": [
+    {
+      "id": "1ijSwEShvWnGV5YtKDgwd7sfRljQMoVuq",
+      "name": "Meeting Transcripts",
+      "taskPrefix": "[Meeting]",
+      "notifyChat": {
+        "type": "dm_owner"
+      }
+    }
+  ],
+  "defaultConfig": {
+    "taskPrefix": "",
+    "notifyChat": {
+      "type": "dm_owner"
+    }
+  }
+}

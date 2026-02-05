@@ -1,0 +1,25 @@
+Meeting: Weekly Team Standup
+Date: 2026-02-03
+Participants: Khalid, Ahmed, Sara, Fahad
+
+Khalid: Good morning everyone. Let's start with updates.
+
+Ahmed: I finished the API documentation yesterday. The frontend team needs to review it by Friday.
+
+Sara: I'll handle the review. Also, Fahad, can you update the database schema? We need the new user fields added before next week.
+
+Fahad: Sure, I'll get that done by Wednesday.
+
+Khalid: Great. Sara, please also prepare the quarterly report. It's due by end of month.
+
+Sara: Will do. One more thing - we need someone to look into the performance issues on the dashboard. It's been slow since the last deploy.
+
+Khalid: Ahmed, can you investigate that? Make it a priority.
+
+Ahmed: I'll start on it today. Should have findings by tomorrow.
+
+Khalid: Perfect. Let's also schedule a design review for the new feature. Fahad, can you set that up for next Tuesday?
+
+Fahad: Done. I'll send the invite after this meeting.
+
+Khalid: Thanks everyone. Let's reconvene next Monday.

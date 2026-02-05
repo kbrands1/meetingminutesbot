@@ -1,0 +1,22 @@
+{
+  "gcp": {
+    "projectId": "meeting-bot-486305",
+    "pubsubTopic": "meeting-transcripts",
+    "firestoreCollection": "pending-tasks"
+  },
+  "openai": {
+    "model": "gpt-4o",
+    "fallbackModel": "gpt-4o-mini",
+    "confidenceThreshold": 0.7
+  },
+  "clickup": {
+    "workspaceId": "8459040"
+  },
+  "taskDefaults": {
+    "priority": "normal",
+    "includeTranscriptLink": true
+  },
+  "driveWatcher": {
+    "renewalIntervalHours": 12
+  }
+}

@@ -1,0 +1,13 @@
+WEBVTT
+
+00:00:01.000 --> 00:00:05.000
+Khalid: Welcome to the sprint planning.
+
+00:00:06.000 --> 00:00:12.000
+Ahmed: I have three items from last sprint that need carryover. Can we assign the API refactoring to Fahad?
+
+00:00:13.000 --> 00:00:20.000
+Fahad: Sure. I'll also need Sara to help with the testing. Task: Complete API refactoring and unit tests by next Friday.
+
+00:00:21.000 --> 00:00:28.000
+Sara: Got it. I'll create the test plan today and share it with the team.
