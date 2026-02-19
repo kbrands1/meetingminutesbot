@@ -2,10 +2,12 @@ import { google } from 'googleapis';
 import type {
   ExtractedTaskWithConfig,
   MeetingInfo,
+  MeetingAnalysis,
   ClickUpMember,
   TaskPriority
 } from '../types/index.js';
 import { getWorkspaceMembers } from './clickupService.js';
+import { getChatFunctionUrl } from '../config/index.js';
 
 // Use any for Chat API types since they vary between versions
 type ChatClient = ReturnType<typeof google.chat>;
@@ -21,8 +23,14 @@ const PRIORITY_DISPLAY: Record<TaskPriority, { emoji: string; label: string }> =
   low: { emoji: '🔵', label: 'Low' }
 };
 
-// Function URL for Workspace Add-on actions
-const CHAT_FUNCTION_URL = process.env.CHAT_FUNCTION_URL || 'https://handlechatinteraction-jrgrpko2qa-uc.a.run.app';
+// Function URL for Workspace Add-on actions (lazy-loaded to avoid startup errors)
+let _chatFunctionUrl: string | null = null;
+function getChatFunctionUrlCached(): string {
+  if (!_chatFunctionUrl) {
+    _chatFunctionUrl = getChatFunctionUrl();
+  }
+  return _chatFunctionUrl;
+}
 
 // Initialize Chat client
 function getChatClient(): ChatClient {
@@ -47,9 +55,11 @@ export async function sendTaskApprovalCards(params: {
   tasks: ExtractedTaskWithConfig[];
   meetingInfo: MeetingInfo;
   folderName: string;
+  analysis?: MeetingAnalysis;
+  transcriptLink?: string;
 }): Promise<void> {
   const chat = getChatClient();
-  const { spaceId, pendingId, tasks, meetingInfo, folderName } = params;
+  const { spaceId, pendingId, tasks, meetingInfo, folderName, analysis, transcriptLink } = params;
 
   // Get ClickUp members for assignee dropdown
   const members = await getWorkspaceMembers();
@@ -60,7 +70,9 @@ export async function sendTaskApprovalCards(params: {
     tasks,
     meetingInfo,
     folderName,
-    members
+    members,
+    analysis,
+    transcriptLink
   );
 
   await chat.spaces.messages.create({
@@ -81,9 +93,11 @@ export async function sendDMToUser(params: {
   tasks: ExtractedTaskWithConfig[];
   meetingInfo: MeetingInfo;
   folderName: string;
+  analysis?: MeetingAnalysis;
+  transcriptLink?: string;
 }): Promise<void> {
   const chat = getChatClient();
-  const { userEmail, pendingId, tasks, meetingInfo, folderName } = params;
+  const { userEmail, pendingId, tasks, meetingInfo, folderName, analysis, transcriptLink } = params;
 
   // Get ClickUp members for assignee dropdown
   const members = await getWorkspaceMembers();
@@ -92,29 +106,34 @@ export async function sendDMToUser(params: {
   let spaceName: string | null = null;
 
   try {
-    // First try to list existing spaces to find a DM with this user
+    // List existing DM spaces and find the one with the target user
     const spacesResponse = await chat.spaces.list({
       filter: 'spaceType = "DIRECT_MESSAGE"'
     });
 
-    const existingDM = ((spacesResponse.data as any).spaces || []).find((space: any) => {
-      // Check if this DM space is with the target user
-      return space.singleUserBotDm === false; // It's a human DM
+    const dmSpaces = ((spacesResponse.data as any).spaces || []).filter((space: any) => {
+      return space.singleUserBotDm === false; // Only human DMs, not bot-only DMs
     });
 
-    if (existingDM && existingDM.name) {
-      // Check membership to confirm it's with the right user
-      const membersResponse = await chat.spaces.members.list({
-        parent: existingDM.name as string
-      });
+    // Check each DM space's membership to find the one with the target user
+    for (const dmSpace of dmSpaces) {
+      if (!dmSpace.name) continue;
+      try {
+        const membersResponse = await chat.spaces.members.list({
+          parent: dmSpace.name as string
+        });
 
-      const hasUser = ((membersResponse.data as any).memberships || []).some((m: any) =>
-        m.member?.name?.includes(userEmail) || m.member?.email === userEmail
-      );
+        const hasUser = ((membersResponse.data as any).memberships || []).some((m: any) =>
+          m.member?.name?.includes(userEmail) || m.member?.email === userEmail
+        );
 
-      if (hasUser) {
-        spaceName = existingDM.name as string;
-        console.log(`Found existing DM space with ${userEmail}: ${spaceName}`);
+        if (hasUser) {
+          spaceName = dmSpace.name as string;
+          console.log(`Found existing DM space with ${userEmail}: ${spaceName}`);
+          break;
+        }
+      } catch (memberError) {
+        console.log(`Could not check members for space ${dmSpace.name}, skipping`);
       }
     }
   } catch (listError) {
@@ -160,7 +179,9 @@ export async function sendDMToUser(params: {
     tasks,
     meetingInfo,
     folderName,
-    members
+    members,
+    analysis,
+    transcriptLink
   );
 
   await chat.spaces.messages.create({
@@ -179,29 +200,76 @@ export function buildTaskApprovalMessage(
   tasks: ExtractedTaskWithConfig[],
   meetingInfo: MeetingInfo,
   folderName: string,
-  members: ClickUpMember[]
+  members: ClickUpMember[],
+  analysis?: MeetingAnalysis,
+  transcriptLink?: string
 ): ChatMessage {
   const cards: ChatCard[] = [];
 
-  // Header card with meeting info
+  // Header card with meeting info, summary, and decisions
+  const headerWidgets: ChatWidget[] = [];
+
+  // Meeting summary
+  if (analysis?.meeting_summary) {
+    headerWidgets.push({
+      decoratedText: {
+        topLabel: 'Meeting Summary',
+        text: analysis.meeting_summary,
+        wrapText: true
+      }
+    });
+  }
+
+  // Key decisions
+  if (analysis?.decisions && analysis.decisions.length > 0) {
+    headerWidgets.push({
+      decoratedText: {
+        topLabel: 'Key Decisions',
+        text: analysis.decisions.map(d => `• ${d}`).join('\n'),
+        wrapText: true
+      }
+    });
+  }
+
+  // Task count + transcript link
+  headerWidgets.push({
+    decoratedText: {
+      topLabel: 'Tasks Found',
+      text: `${tasks.length} task${tasks.length !== 1 ? 's' : ''} extracted from this meeting`,
+      ...(transcriptLink && {
+        button: {
+          text: '📄 View Transcript',
+          onClick: {
+            openLink: {
+              url: transcriptLink
+            }
+          }
+        }
+      })
+    }
+  });
+
+  // Attendees
+  if (meetingInfo.attendees.length > 0) {
+    headerWidgets.push({
+      decoratedText: {
+        topLabel: 'Attendees',
+        text: meetingInfo.attendees.join(', ')
+      }
+    });
+  }
+
   const headerCard: ChatCard = {
     cardId: 'header',
     card: {
       header: {
-        title: `📋 Tasks from: ${meetingInfo.title}`,
+        title: `📋 ${meetingInfo.title}`,
         subtitle: `📁 ${folderName} • 📅 ${formatDate(meetingInfo.date)}`,
         imageType: 'CIRCLE'
       },
       sections: [
         {
-          widgets: [
-            {
-              decoratedText: {
-                topLabel: 'Tasks Found',
-                text: `${tasks.length} task${tasks.length !== 1 ? 's' : ''} extracted from this meeting`
-              }
-            }
-          ]
+          widgets: headerWidgets
         }
       ]
     }
@@ -229,7 +297,7 @@ export function buildTaskApprovalMessage(
                       text: '✅ Create All Tasks',
                       onClick: {
                         action: {
-                          function: CHAT_FUNCTION_URL,
+                          function: getChatFunctionUrlCached(),
                           parameters: [
                             { key: 'actionName', value: 'createAllTasks' },
                             { key: 'pendingId', value: pendingId }
@@ -241,7 +309,7 @@ export function buildTaskApprovalMessage(
                       text: '❌ Dismiss All',
                       onClick: {
                         action: {
-                          function: CHAT_FUNCTION_URL,
+                          function: getChatFunctionUrlCached(),
                           parameters: [
                             { key: 'actionName', value: 'dismissAllTasks' },
                             { key: 'pendingId', value: pendingId }
@@ -367,7 +435,7 @@ function buildTaskCard(
           text: '✅ Create Task',
           onClick: {
             action: {
-              function: CHAT_FUNCTION_URL,
+              function: getChatFunctionUrlCached(),
               parameters: [
                 { key: 'actionName', value: 'createTask' },
                 { key: 'pendingId', value: pendingId },
@@ -380,7 +448,7 @@ function buildTaskCard(
           text: '❌ Dismiss',
           onClick: {
             action: {
-              function: CHAT_FUNCTION_URL,
+              function: getChatFunctionUrlCached(),
               parameters: [
                 { key: 'actionName', value: 'dismissTask' },
                 { key: 'pendingId', value: pendingId },
@@ -407,87 +475,6 @@ function buildTaskCard(
       ]
     }
   };
-}
-
-/**
- * Send a confirmation message after task creation.
- */
-export async function sendTaskCreatedConfirmation(
-  spaceId: string,
-  taskName: string,
-  taskUrl: string,
-  listName: string
-): Promise<void> {
-  const chat = getChatClient();
-
-  await chat.spaces.messages.create({
-    parent: spaceId,
-    requestBody: {
-      text: `✅ Task created successfully!\n\n*${taskName}*\n📋 List: ${listName}\n🔗 ${taskUrl}`
-    }
-  });
-}
-
-/**
- * Send an error message.
- */
-export async function sendErrorMessage(
-  spaceId: string,
-  errorMessage: string
-): Promise<void> {
-  const chat = getChatClient();
-
-  await chat.spaces.messages.create({
-    parent: spaceId,
-    requestBody: {
-      text: `❌ Error: ${errorMessage}`
-    }
-  });
-}
-
-/**
- * Update a card message to show task was created.
- */
-export async function updateCardWithSuccess(
-  messageName: string,
-  taskIndex: number,
-  taskUrl: string
-): Promise<void> {
-  const chat = getChatClient();
-
-  // Update the specific card to show success state
-  await chat.spaces.messages.update({
-    name: messageName,
-    updateMask: 'cardsV2',
-    requestBody: {
-      cardsV2: [
-        {
-          cardId: `task_${taskIndex}_success`,
-          card: {
-            sections: [
-              {
-                widgets: [
-                  {
-                    decoratedText: {
-                      text: '✅ Task created successfully!',
-                      button: {
-                        text: 'View in ClickUp',
-                        onClick: {
-                          openLink: {
-                            url: taskUrl
-                          }
-                        }
-                      }
-                    }
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      ]
-    }
-  });
 }
 
 /**

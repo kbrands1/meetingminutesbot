@@ -5,14 +5,12 @@ import {
   markTaskAsCreated,
   markTaskAsDismissed,
   updatePendingTasksStatus,
-  getUserPendingTasks
+  getUserPendingTasks,
+  getPendingTasksStats
 } from '../services/firestoreService.js';
-import { createTask, getListDetails, getWorkspaceMembers } from '../services/clickupService.js';
-import {
-  sendTaskCreatedConfirmation,
-  sendErrorMessage,
-  buildTaskApprovalMessage
-} from '../services/chatService.js';
+import { createTask, getListDetails } from '../services/clickupService.js';
+import { getAllFolderConfigs } from '../utils/folderConfigResolver.js';
+import { getChatFunctionUrl } from '../config/index.js';
 import type { ChatCardInteraction, TaskPriority } from '../types/index.js';
 
 /**
@@ -149,14 +147,14 @@ async function handleMessage(
   if (messageText.includes('help')) {
     res.setHeader('Content-Type', 'application/json');
     res.status(200).json(wrapResponse({
-      text: `📚 *Meeting Task Bot Help*\n\n• I automatically process meeting transcripts from monitored Drive folders\n• Tasks are extracted using AI and sent to you for approval\n• Use the card buttons to create tasks in ClickUp\n\n*Commands:*\n• \`help\` - Show this message\n• \`status\` - Check bot status\n• \`tasks\` or \`pending\` - Show your pending tasks`
+      text: `📚 *Meeting Task Bot Help*\n\n• I automatically process meeting transcripts from monitored Drive folders\n• Tasks are extracted using AI and sent to you for approval\n• Use the card buttons to create tasks in ClickUp\n\n*Commands:*\n• \`help\` - Show this message\n• \`status\` - Dashboard with folders & stats\n• \`tasks\` or \`pending\` - Show your pending tasks\n• \`recent\` - Show recently processed meetings`
     }));
     return;
   } else if (messageText.includes('status')) {
-    res.setHeader('Content-Type', 'application/json');
-    res.status(200).json(wrapResponse({
-      text: `✅ Meeting Task Bot is running and monitoring folders for new transcripts.`
-    }));
+    await handleStatusCommand(res);
+    return;
+  } else if (messageText.includes('recent')) {
+    await handleRecentCommand(res);
     return;
   } else if (messageText.includes('task') || messageText.includes('pending')) {
     // Show pending tasks for this user
@@ -172,6 +170,80 @@ async function handleMessage(
       }));
     }
     return;
+  }
+}
+
+/**
+ * Handle the status command - show monitoring dashboard.
+ */
+async function handleStatusCommand(res: Response): Promise<void> {
+  try {
+    const folders = getAllFolderConfigs();
+    const stats = await getPendingTasksStats();
+
+    const folderList = folders
+      .map(f => `• 📁 *${f.name}* — prefix: \`${f.taskPrefix || '(none)'}\``)
+      .join('\n');
+
+    const statusText = [
+      `✅ *Meeting Task Bot Status*`,
+      ``,
+      `*Monitored Folders (${folders.length}):*`,
+      folderList,
+      ``,
+      `*Task Stats:*`,
+      `• Pending review: ${stats.pending}`,
+      `• In progress: ${stats.processing}`,
+      `• Completed: ${stats.completed}`,
+      `• Total processed: ${stats.total}`,
+    ].join('\n');
+
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json(wrapResponse({ text: statusText }));
+  } catch (error) {
+    console.error('Error in status command:', error);
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json(wrapResponse({ text: '✅ Meeting Task Bot is running.' }));
+  }
+}
+
+/**
+ * Handle the recent command - show recently processed meetings.
+ */
+async function handleRecentCommand(res: Response): Promise<void> {
+  try {
+    // Get the most recent task sets (all statuses - pending, processing, completed)
+    const pendingTasks = await getUserPendingTasks(10, true);
+
+    if (!pendingTasks || pendingTasks.length === 0) {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json(wrapResponse({
+        text: `📭 No recently processed meetings found.\n\nTranscripts will appear here after they are uploaded to a monitored Drive folder.`
+      }));
+      return;
+    }
+
+    const meetingLines = pendingTasks.map(ts => {
+      const totalTasks = ts.tasks.length;
+      const created = ts.tasks.filter((t: any) => t.clickupTaskId).length;
+      const dismissed = ts.tasks.filter((t: any) => t.dismissed).length;
+      const pending = totalTasks - created - dismissed;
+
+      let statusEmoji = '⏳';
+      if (pending === 0) statusEmoji = '✅';
+      else if (created > 0 || dismissed > 0) statusEmoji = '🔄';
+
+      return `${statusEmoji} *${ts.meetingInfo.title}*\n   📁 ${ts.folderConfig.name} • ${totalTasks} tasks (${created} created, ${dismissed} dismissed, ${pending} pending)`;
+    });
+
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json(wrapResponse({
+      text: `📋 *Recent Meetings*\n\n${meetingLines.join('\n\n')}\n\nType \`tasks\` to review pending tasks.`
+    }));
+  } catch (error) {
+    console.error('Error in recent command:', error);
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json(wrapResponse({ text: '❌ Error loading recent meetings.' }));
   }
 }
 
@@ -192,76 +264,135 @@ async function showPendingTasks(
       return false;
     }
 
-    // Get ClickUp members for assignee dropdown
-    const members = await getWorkspaceMembers();
-    console.log(`Loaded ${members.length} members`);
+    // Find the first pending task set that has active (non-dismissed, non-created) tasks
+    let mostRecent: (typeof pendingTasks)[0] | null = null;
+    let activeTasks: any[] = [];
 
-    // Get the most recent pending task set
-    const mostRecent = pendingTasks[0];
-    console.log(`Building card for ${mostRecent.tasks?.length || 0} tasks`);
+    for (const taskSet of pendingTasks) {
+      const active = taskSet.tasks
+        .map((t: any, originalIndex: number) => ({ ...t, _originalIndex: originalIndex }))
+        .filter((t: any) => !t.dismissed && !t.clickupTaskId);
 
-    // Build cards with buttons for each task
-    const FUNCTION_URL = 'https://handlechatinteraction-jrgrpko2qa-uc.a.run.app';
-
-    const taskCards = mostRecent.tasks.slice(0, 5).map((t: any, i: number) => ({
-      cardId: `task_${i}`,
-      card: {
-        name: `Task ${i + 1}`,
-        header: {
-          title: `Task ${i + 1}: ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}`,
-          subtitle: `Priority: ${t.priority} | ${t.suggested_assignee || 'Unassigned'}`
-        },
-        sections: [
-          {
-            widgets: [
-              {
-                decoratedText: {
-                  topLabel: 'Description',
-                  text: t.description?.substring(0, 100) || t.title,
-                  wrapText: true
-                }
-              },
-              {
-                buttonList: {
-                  buttons: [
-                    {
-                      text: '✅ Create Task',
-                      onClick: {
-                        action: {
-                          function: FUNCTION_URL,
-                          parameters: [
-                            { key: 'actionName', value: 'createTask' },
-                            { key: 'pendingId', value: mostRecent.id },
-                            { key: 'taskIndex', value: i.toString() }
-                          ]
-                        }
-                      }
-                    },
-                    {
-                      text: '❌ Dismiss',
-                      onClick: {
-                        action: {
-                          function: FUNCTION_URL,
-                          parameters: [
-                            { key: 'actionName', value: 'dismissTask' },
-                            { key: 'pendingId', value: mostRecent.id },
-                            { key: 'taskIndex', value: i.toString() }
-                          ]
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
+      if (active.length > 0) {
+        mostRecent = taskSet;
+        activeTasks = active;
+        break;
       }
-    }));
+    }
+
+    if (!mostRecent || activeTasks.length === 0) {
+      console.log('All pending task sets have been fully resolved');
+      return false;
+    }
+
+    console.log(`Building card for ${activeTasks.length} active tasks (${mostRecent.tasks.length} total)`);
+
+    const FUNCTION_URL = getChatFunctionUrl();
+    const cards: any[] = [];
+
+    // Header card with meeting context
+    const headerWidgets: any[] = [];
+
+    if (mostRecent.analysis?.meeting_summary) {
+      headerWidgets.push({
+        decoratedText: {
+          topLabel: 'Meeting Summary',
+          text: mostRecent.analysis.meeting_summary,
+          wrapText: true
+        }
+      });
+    }
+
+    if (mostRecent.analysis?.decisions && mostRecent.analysis.decisions.length > 0) {
+      headerWidgets.push({
+        decoratedText: {
+          topLabel: 'Key Decisions',
+          text: mostRecent.analysis.decisions.map((d: string) => `• ${d}`).join('\n'),
+          wrapText: true
+        }
+      });
+    }
+
+    headerWidgets.push({
+      decoratedText: {
+        topLabel: 'Tasks Pending Review',
+        text: `${activeTasks.length} task${activeTasks.length !== 1 ? 's' : ''} remaining out of ${mostRecent.tasks.length} total`
+      }
+    });
+
+    cards.push({
+      cardId: 'header',
+      card: {
+        header: {
+          title: `📋 ${mostRecent.meetingInfo.title}`,
+          subtitle: `📁 ${mostRecent.folderConfig.name}`
+        },
+        sections: [{ widgets: headerWidgets }]
+      }
+    });
+
+    // Task cards with action buttons
+    activeTasks.slice(0, 5).forEach((t: any) => {
+      const i = t._originalIndex;
+      cards.push({
+        cardId: `task_${i}`,
+        card: {
+          header: {
+            title: `Task ${i + 1}: ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}`,
+            subtitle: `Priority: ${t.priority} | ${t.suggested_assignee || 'Unassigned'}`
+          },
+          sections: [
+            {
+              widgets: [
+                {
+                  decoratedText: {
+                    topLabel: 'Description',
+                    text: t.description?.substring(0, 100) || t.title,
+                    wrapText: true
+                  }
+                },
+                {
+                  buttonList: {
+                    buttons: [
+                      {
+                        text: '✅ Create Task',
+                        onClick: {
+                          action: {
+                            function: FUNCTION_URL,
+                            parameters: [
+                              { key: 'actionName', value: 'createTask' },
+                              { key: 'pendingId', value: mostRecent!.id },
+                              { key: 'taskIndex', value: i.toString() }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        text: '❌ Dismiss',
+                        onClick: {
+                          action: {
+                            function: FUNCTION_URL,
+                            parameters: [
+                              { key: 'actionName', value: 'dismissTask' },
+                              { key: 'pendingId', value: mostRecent!.id },
+                              { key: 'taskIndex', value: i.toString() }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      });
+    });
 
     const cardResponse = {
-      text: `Found ${mostRecent.tasks.length} tasks from ${mostRecent.meetingInfo.title}`,
-      cardsV2: taskCards
+      text: `Found ${activeTasks.length} pending tasks from ${mostRecent.meetingInfo.title}`,
+      cardsV2: cards
     };
 
     console.log('Sending card response...');
@@ -375,12 +506,32 @@ async function handleCreateTask(
     await updateTaskDetails(pendingId, index, updatedTask);
 
     // Create the task in ClickUp
+    // Parse assignee ID - form dropdowns return numeric IDs, but OpenAI returns names
+    let assigneeId: number | undefined;
+    if (updatedTask.suggested_assignee) {
+      const parsed = parseInt(updatedTask.suggested_assignee, 10);
+      if (!isNaN(parsed)) {
+        assigneeId = parsed;
+      }
+      // If it's a name (NaN), skip - the user can assign later in ClickUp
+    }
+
+    // Build rich description with meeting context
+    const descriptionParts = [updatedTask.description || updatedTask.title];
+    descriptionParts.push('');
+    descriptionParts.push(`---`);
+    descriptionParts.push(`📋 Meeting: ${pending.meetingInfo.title}`);
+    descriptionParts.push(`📅 Date: ${pending.meetingInfo.date}`);
+    descriptionParts.push(`📁 Folder: ${pending.folderConfig.name}`);
+    if (updatedTask.source_quote && !updatedTask.source_quote.includes('[Confidential')) {
+      descriptionParts.push(`💬 Source: "${updatedTask.source_quote}"`);
+    }
+    descriptionParts.push(`🤖 Extraction: ${updatedTask.extraction_type} (${Math.round(updatedTask.confidence * 100)}% confidence)`);
+
     const clickupTask = await createTask(task.clickupListId, {
       name: updatedTask.title,
-      description: updatedTask.description,
-      assigneeId: updatedTask.suggested_assignee
-        ? parseInt(updatedTask.suggested_assignee, 10)
-        : undefined,
+      description: descriptionParts.join('\n'),
+      assigneeId,
       dueDate: updatedTask.suggested_due || undefined,
       priority: updatedTask.priority,
       extractionType: updatedTask.extraction_type,
@@ -393,9 +544,53 @@ async function handleCreateTask(
     // Get list name for confirmation
     const listDetails = await getListDetails(task.clickupListId);
 
-    // Send confirmation
+    // Send confirmation card with clickable link to ClickUp task
     res.json(wrapResponse({
-      text: `✅ Task created!\n\n*${clickupTask.name}*\n📋 List: ${listDetails.name}\n🔗 ${clickupTask.url}`
+      text: `✅ Task created: ${clickupTask.name}`,
+      cardsV2: [
+        {
+          cardId: `created_${index}`,
+          card: {
+            header: {
+              title: '✅ Task Created Successfully',
+              subtitle: listDetails.name
+            },
+            sections: [
+              {
+                widgets: [
+                  {
+                    decoratedText: {
+                      topLabel: 'Task',
+                      text: clickupTask.name,
+                      wrapText: true
+                    }
+                  },
+                  {
+                    decoratedText: {
+                      topLabel: 'List',
+                      text: listDetails.name
+                    }
+                  },
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: '🔗 View in ClickUp',
+                          onClick: {
+                            openLink: {
+                              url: clickupTask.url
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
     }));
 
   } catch (error) {
@@ -445,8 +640,9 @@ async function handleCreateAllTasks(
 
     await updatePendingTasksStatus(pendingId, 'processing');
 
-    const results: string[] = [];
+    const results: Array<{ success: boolean; name: string; url: string; error?: string }> = [];
     let successCount = 0;
+    let eligibleCount = 0;
 
     for (let i = 0; i < pending.tasks.length; i++) {
       const task = pending.tasks[i];
@@ -456,35 +652,95 @@ async function handleCreateAllTasks(
         continue;
       }
 
+      eligibleCount++;
+
       try {
         // Apply any form edits
         const updatedTask = applyFormEdits(task, i, formInputs);
 
+        let bulkAssigneeId: number | undefined;
+        if (updatedTask.suggested_assignee) {
+          const parsed = parseInt(updatedTask.suggested_assignee, 10);
+          if (!isNaN(parsed)) {
+            bulkAssigneeId = parsed;
+          }
+        }
+
+        // Build rich description with meeting context (same as single task creation)
+        const bulkDescParts = [updatedTask.description || updatedTask.title];
+        bulkDescParts.push('');
+        bulkDescParts.push(`---`);
+        bulkDescParts.push(`📋 Meeting: ${pending.meetingInfo.title}`);
+        bulkDescParts.push(`📅 Date: ${pending.meetingInfo.date}`);
+        bulkDescParts.push(`📁 Folder: ${pending.folderConfig.name}`);
+        if (updatedTask.source_quote && !updatedTask.source_quote.includes('[Confidential')) {
+          bulkDescParts.push(`💬 Source: "${updatedTask.source_quote}"`);
+        }
+        bulkDescParts.push(`🤖 Extraction: ${updatedTask.extraction_type} (${Math.round(updatedTask.confidence * 100)}% confidence)`);
+
         const clickupTask = await createTask(task.clickupListId, {
           name: updatedTask.title,
-          description: updatedTask.description,
-          assigneeId: updatedTask.suggested_assignee
-            ? parseInt(updatedTask.suggested_assignee, 10)
-            : undefined,
+          description: bulkDescParts.join('\n'),
+          assigneeId: bulkAssigneeId,
           dueDate: updatedTask.suggested_due || undefined,
-          priority: updatedTask.priority
+          priority: updatedTask.priority,
+          extractionType: updatedTask.extraction_type,
+          sourceFolder: pending.folderConfig.name
         });
 
         await markTaskAsCreated(pendingId, i, clickupTask.id);
-        results.push(`✅ ${clickupTask.name}`);
+        results.push({ success: true, name: clickupTask.name, url: clickupTask.url });
         successCount++;
 
         // Small delay between creations
         await sleep(200);
       } catch (error) {
-        results.push(`❌ ${task.title}: ${error instanceof Error ? error.message : 'Failed'}`);
+        results.push({ success: false, name: task.title, url: '', error: error instanceof Error ? error.message : 'Failed' });
       }
     }
 
     await updatePendingTasksStatus(pendingId, 'completed');
 
+    // Build result cards with clickable links for each created task
+    const resultWidgets: any[] = results.map((r: any) => {
+      if (r.success) {
+        return {
+          decoratedText: {
+            topLabel: '✅ Created',
+            text: r.name,
+            wrapText: true,
+            button: {
+              text: 'View',
+              onClick: {
+                openLink: { url: r.url }
+              }
+            }
+          }
+        };
+      }
+      return {
+        decoratedText: {
+          topLabel: '❌ Failed',
+          text: `${r.name}: ${r.error}`,
+          wrapText: true
+        }
+      };
+    });
+
     res.json(wrapResponse({
-      text: `📋 Bulk task creation complete!\n\n${successCount}/${pending.tasks.length} tasks created:\n${results.join('\n')}`
+      text: `📋 Bulk creation: ${successCount}/${eligibleCount} tasks created`,
+      cardsV2: [
+        {
+          cardId: 'bulk_results',
+          card: {
+            header: {
+              title: `📋 Bulk Task Creation Complete`,
+              subtitle: `${successCount}/${eligibleCount} tasks created successfully`
+            },
+            sections: [{ widgets: resultWidgets }]
+          }
+        }
+      ]
     }));
 
   } catch (error) {
@@ -512,7 +768,8 @@ async function handleDismissAllTasks(
     }
 
     for (let i = 0; i < pending.tasks.length; i++) {
-      if (!(pending.tasks[i] as any).clickupTaskId) {
+      const task = pending.tasks[i] as any;
+      if (!task.clickupTaskId && !task.dismissed) {
         await markTaskAsDismissed(pendingId, i);
       }
     }

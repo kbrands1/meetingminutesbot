@@ -44,3 +44,8 @@ export function getOpenAIApiKey(): string {
 export function getClickUpApiKey(): string {
   return getEnvVar('CLICKUP_API_KEY');
 }
+
+// Chat function URL for Workspace Add-on card actions
+export function getChatFunctionUrl(): string {
+  return getEnvVar('CHAT_FUNCTION_URL', 'https://handlechatinteraction-jrgrpko2qa-uc.a.run.app');
+}

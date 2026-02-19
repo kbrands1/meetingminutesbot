@@ -10,6 +10,7 @@ import { extractTasks } from '../services/openaiService.js';
 import { sendTaskApprovalCards, sendDMToUser } from '../services/chatService.js';
 import { storePendingTasks, isFileAlreadyProcessed } from '../services/firestoreService.js';
 import { parseTranscript } from '../utils/transcriptParser.js';
+import { appConfig } from '../config/index.js';
 import type {
   TranscriptPubSubMessage,
   MeetingInfo,
@@ -110,11 +111,24 @@ export async function processTranscript(
     return;
   }
 
+  // Filter tasks by confidence threshold (explicit tasks always pass)
+  const confidenceThreshold = appConfig.openai.confidenceThreshold;
+  const filteredTasks = analysis.tasks.filter(task =>
+    task.extraction_type === 'explicit' || task.confidence >= confidenceThreshold
+  );
+
+  console.log(`Filtered ${analysis.tasks.length} tasks to ${filteredTasks.length} (threshold: ${confidenceThreshold})`);
+
+  if (filteredTasks.length === 0) {
+    console.log('No tasks above confidence threshold');
+    return;
+  }
+
   // Get the single ClickUp list ID for all meeting tasks
   const clickupListId = getClickUpListId();
 
   // Apply folder-specific task prefix
-  const tasksWithConfig: ExtractedTaskWithConfig[] = analysis.tasks.map(task => ({
+  const tasksWithConfig: ExtractedTaskWithConfig[] = filteredTasks.map(task => ({
     ...task,
     title: folderConfig.taskPrefix
       ? `${folderConfig.taskPrefix} ${task.title}`
@@ -142,6 +156,9 @@ export async function processTranscript(
 
   console.log(`Stored pending tasks with ID: ${pendingId}`);
 
+  // Get transcript link for reference
+  const transcriptLink = metadata.webViewLink;
+
   // Get all users to notify (global + folder-specific)
   const notifyUsers = getNotifyUsers(folderId);
   const ownerEmail = metadata.owners?.[0]?.emailAddress;
@@ -156,7 +173,9 @@ export async function processTranscript(
       pendingId,
       tasks: tasksWithConfig,
       meetingInfo,
-      folderName: folderConfig.name
+      folderName: folderConfig.name,
+      analysis,
+      transcriptLink
     });
     console.log(`Sent approval cards to space: ${folderConfig.notifyChat.spaceId}`);
   } else if (ownerEmail) {
@@ -172,7 +191,9 @@ export async function processTranscript(
         pendingId,
         tasks: tasksWithConfig,
         meetingInfo,
-        folderName: folderConfig.name
+        folderName: folderConfig.name,
+        analysis,
+        transcriptLink
       });
       console.log(`Sent approval cards via DM to: ${userEmail}`);
     } catch (error) {

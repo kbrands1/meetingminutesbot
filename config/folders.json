@@ -9,6 +9,22 @@
       "notifyChat": {
         "type": "dm_owner"
       }
+    },
+    {
+      "id": "FOLDER_ID_2",
+      "name": "Team Standups",
+      "taskPrefix": "[Standup]",
+      "notifyChat": {
+        "type": "dm_owner"
+      }
+    },
+    {
+      "id": "FOLDER_ID_3",
+      "name": "Client Meetings",
+      "taskPrefix": "[Client]",
+      "notifyChat": {
+        "type": "dm_owner"
+      }
     }
   ],
   "defaultConfig": {

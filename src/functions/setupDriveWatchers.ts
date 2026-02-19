@@ -86,7 +86,8 @@ export async function driveWebhook(
   // Handle both 'change' and 'update' states from Drive
   if (resourceState === 'change' || resourceState === 'update') {
     // Extract folder ID from channel ID (format: meeting-bot-{folderId}-{timestamp})
-    const folderIdMatch = channelId.match(/meeting-bot-(.+?)-\d+$/);
+    // Use greedy match (.+) to handle folder IDs that may contain hyphens
+    const folderIdMatch = channelId.match(/^meeting-bot-(.+)-(\d+)$/);
     if (!folderIdMatch) {
       console.warn(`Could not extract folder ID from channel: ${channelId}`);
       res.status(200).send('OK');

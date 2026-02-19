@@ -77,61 +77,85 @@ export async function updatePendingTasksStatus(
 
 /**
  * Mark a specific task as created in ClickUp.
+ * Automatically marks the parent document as 'completed' if all tasks are resolved.
  */
 export async function markTaskAsCreated(
   pendingId: string,
   taskIndex: number,
   clickupTaskId: string
 ): Promise<void> {
-  const doc = await getPendingTasksCollection().doc(pendingId).get();
+  const docRef = getPendingTasksCollection().doc(pendingId);
 
-  if (!doc.exists) {
-    throw new Error(`Pending tasks not found: ${pendingId}`);
-  }
+  await firestore.runTransaction(async (transaction) => {
+    const doc = await transaction.get(docRef);
 
-  const data = doc.data() as PendingTasksData;
-  const tasks = [...data.tasks];
+    if (!doc.exists) {
+      throw new Error(`Pending tasks not found: ${pendingId}`);
+    }
 
-  if (taskIndex < 0 || taskIndex >= tasks.length) {
-    throw new Error(`Invalid task index: ${taskIndex}`);
-  }
+    const data = doc.data() as PendingTasksData;
+    const tasks = [...data.tasks];
 
-  // Add clickup task ID to the task
-  (tasks[taskIndex] as any).clickupTaskId = clickupTaskId;
-  (tasks[taskIndex] as any).createdAt = new Date().toISOString();
+    if (taskIndex < 0 || taskIndex >= tasks.length) {
+      throw new Error(`Invalid task index: ${taskIndex}`);
+    }
 
-  await getPendingTasksCollection().doc(pendingId).update({
-    tasks,
-    updatedAt: FieldValue.serverTimestamp()
+    // Add clickup task ID to the task
+    (tasks[taskIndex] as any).clickupTaskId = clickupTaskId;
+    (tasks[taskIndex] as any).createdAt = new Date().toISOString();
+
+    const updates: Record<string, any> = {
+      tasks,
+      updatedAt: FieldValue.serverTimestamp()
+    };
+
+    // If all tasks are now dismissed or created, mark the whole set as completed
+    if (areAllTasksResolved(tasks)) {
+      updates.status = 'completed';
+    }
+
+    transaction.update(docRef, updates);
   });
 }
 
 /**
  * Mark a task as dismissed (user declined to create it).
+ * Automatically marks the parent document as 'completed' if all tasks are resolved.
  */
 export async function markTaskAsDismissed(
   pendingId: string,
   taskIndex: number
 ): Promise<void> {
-  const doc = await getPendingTasksCollection().doc(pendingId).get();
+  const docRef = getPendingTasksCollection().doc(pendingId);
 
-  if (!doc.exists) {
-    throw new Error(`Pending tasks not found: ${pendingId}`);
-  }
+  await firestore.runTransaction(async (transaction) => {
+    const doc = await transaction.get(docRef);
 
-  const data = doc.data() as PendingTasksData;
-  const tasks = [...data.tasks];
+    if (!doc.exists) {
+      throw new Error(`Pending tasks not found: ${pendingId}`);
+    }
 
-  if (taskIndex < 0 || taskIndex >= tasks.length) {
-    throw new Error(`Invalid task index: ${taskIndex}`);
-  }
+    const data = doc.data() as PendingTasksData;
+    const tasks = [...data.tasks];
 
-  (tasks[taskIndex] as any).dismissed = true;
-  (tasks[taskIndex] as any).dismissedAt = new Date().toISOString();
+    if (taskIndex < 0 || taskIndex >= tasks.length) {
+      throw new Error(`Invalid task index: ${taskIndex}`);
+    }
 
-  await getPendingTasksCollection().doc(pendingId).update({
-    tasks,
-    updatedAt: FieldValue.serverTimestamp()
+    (tasks[taskIndex] as any).dismissed = true;
+    (tasks[taskIndex] as any).dismissedAt = new Date().toISOString();
+
+    const updates: Record<string, any> = {
+      tasks,
+      updatedAt: FieldValue.serverTimestamp()
+    };
+
+    // If all tasks are now dismissed or created, mark the whole set as completed
+    if (areAllTasksResolved(tasks)) {
+      updates.status = 'completed';
+    }
+
+    transaction.update(docRef, updates);
   });
 }
 
@@ -143,25 +167,36 @@ export async function updateTaskDetails(
   taskIndex: number,
   updates: Partial<ExtractedTaskWithConfig>
 ): Promise<void> {
-  const doc = await getPendingTasksCollection().doc(pendingId).get();
+  const docRef = getPendingTasksCollection().doc(pendingId);
 
-  if (!doc.exists) {
-    throw new Error(`Pending tasks not found: ${pendingId}`);
-  }
+  await firestore.runTransaction(async (transaction) => {
+    const doc = await transaction.get(docRef);
 
-  const data = doc.data() as PendingTasksData;
-  const tasks = [...data.tasks];
+    if (!doc.exists) {
+      throw new Error(`Pending tasks not found: ${pendingId}`);
+    }
 
-  if (taskIndex < 0 || taskIndex >= tasks.length) {
-    throw new Error(`Invalid task index: ${taskIndex}`);
-  }
+    const data = doc.data() as PendingTasksData;
+    const tasks = [...data.tasks];
 
-  tasks[taskIndex] = { ...tasks[taskIndex], ...updates };
+    if (taskIndex < 0 || taskIndex >= tasks.length) {
+      throw new Error(`Invalid task index: ${taskIndex}`);
+    }
 
-  await getPendingTasksCollection().doc(pendingId).update({
-    tasks,
-    updatedAt: FieldValue.serverTimestamp()
+    tasks[taskIndex] = { ...tasks[taskIndex], ...updates };
+
+    transaction.update(docRef, {
+      tasks,
+      updatedAt: FieldValue.serverTimestamp()
+    });
   });
+}
+
+/**
+ * Check if all tasks in a set are resolved (either created or dismissed).
+ */
+function areAllTasksResolved(tasks: any[]): boolean {
+  return tasks.every(t => t.clickupTaskId || t.dismissed);
 }
 
 /**
@@ -177,11 +212,16 @@ export async function getPendingTasksByFileId(fileId: string): Promise<PendingTa
 }
 
 /**
- * Check if a file has already been processed.
+ * Check if a file has already been processed (any status).
+ * This prevents duplicate processing even after tasks have been completed/dismissed.
  */
 export async function isFileAlreadyProcessed(fileId: string): Promise<boolean> {
-  const existing = await getPendingTasksByFileId(fileId);
-  return existing.length > 0;
+  const snapshot = await getPendingTasksCollection()
+    .where('fileId', '==', fileId)
+    .limit(1)
+    .get();
+
+  return !snapshot.empty;
 }
 
 /**
@@ -248,14 +288,23 @@ export async function getPendingTasksStats(): Promise<{
 }
 
 /**
- * Get all pending tasks for a user (most recent first).
+ * Get pending tasks for a user (most recent first).
+ * @param limit Max results to return
+ * @param allStatuses If true, return all statuses (for recent command); otherwise only 'pending'
  */
-export async function getUserPendingTasks(limit: number = 5): Promise<(PendingTasksData & { id: string })[]> {
-  const snapshot = await getPendingTasksCollection()
-    .where('status', '==', 'pending')
+export async function getUserPendingTasks(limit: number = 5, allStatuses: boolean = false): Promise<(PendingTasksData & { id: string })[]> {
+  let query = getPendingTasksCollection()
     .orderBy('createdAt', 'desc')
-    .limit(limit)
-    .get();
+    .limit(limit);
+
+  if (!allStatuses) {
+    query = getPendingTasksCollection()
+      .where('status', '==', 'pending')
+      .orderBy('createdAt', 'desc')
+      .limit(limit);
+  }
+
+  const snapshot = await query.get();
 
   return snapshot.docs.map(doc => ({
     id: doc.id,
