@@ -11,17 +11,25 @@
       }
     },
     {
-      "id": "FOLDER_ID_2",
-      "name": "Team Standups",
-      "taskPrefix": "[Standup]",
+      "id": "1yM2r0zfNYy80HPNef18WcR5RQVz9JI0f",
+      "name": "Ahsam's Meetings",
+      "taskPrefix": "[Ahsam]",
       "notifyChat": {
         "type": "dm_owner"
       }
     },
     {
-      "id": "FOLDER_ID_3",
-      "name": "Client Meetings",
-      "taskPrefix": "[Client]",
+      "id": "1GO1kt_t0QjzNzghy0v70edyspoUwdHqC",
+      "name": "Danyal's Meetings",
+      "taskPrefix": "[Danyal]",
+      "notifyChat": {
+        "type": "dm_owner"
+      }
+    },
+    {
+      "id": "19YzCp38qemUIHXec6uTRhiS34b1xUlA0",
+      "name": "Haseeb's Meetings",
+      "taskPrefix": "[Haseeb]",
       "notifyChat": {
         "type": "dm_owner"
       }
