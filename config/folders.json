@@ -33,6 +33,14 @@
       "notifyChat": {
         "type": "dm_owner"
       }
+    },
+    {
+      "id": "1bwYa2HaTm6lwwtmz9PXEDpA-y1PW0L2T",
+      "name": "Khalid's Meetings",
+      "taskPrefix": "[Khalid]",
+      "notifyChat": {
+        "type": "dm_owner"
+      }
     }
   ],
   "defaultConfig": {
