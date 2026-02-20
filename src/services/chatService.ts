@@ -84,40 +84,28 @@ export async function sendTaskApprovalCards(params: {
 }
 
 /**
- * Send task approval cards via DM to a user.
- * Note: Requires domain-wide delegation OR the user to have messaged the bot first.
+ * Find an existing DM space with a user.
+ * Returns the space name if found, null otherwise.
+ * The bot can only find DM spaces where the user has previously messaged it.
  */
-export async function sendDMToUser(params: {
-  userEmail: string;
-  pendingId: string;
-  tasks: ExtractedTaskWithConfig[];
-  meetingInfo: MeetingInfo;
-  folderName: string;
-  analysis?: MeetingAnalysis;
-  transcriptLink?: string;
-}): Promise<void> {
+export async function findExistingDMSpace(userEmail: string): Promise<string | null> {
   const chat = getChatClient();
-  const { userEmail, pendingId, tasks, meetingInfo, folderName, analysis, transcriptLink } = params;
-
-  // Get ClickUp members for assignee dropdown
-  const members = await getWorkspaceMembers();
-
-  // Try to find an existing DM space with this user, or create one
-  let spaceName: string | null = null;
 
   try {
-    // List existing DM spaces and find the one with the target user
+    // List DM spaces the bot is part of
     const spacesResponse = await chat.spaces.list({
       filter: 'spaceType = "DIRECT_MESSAGE"'
     });
 
-    const dmSpaces = ((spacesResponse.data as any).spaces || []).filter((space: any) => {
-      return space.singleUserBotDm === false; // Only human DMs, not bot-only DMs
-    });
+    const allSpaces = (spacesResponse.data as any).spaces || [];
 
     // Check each DM space's membership to find the one with the target user
-    for (const dmSpace of dmSpaces) {
+    for (const dmSpace of allSpaces) {
       if (!dmSpace.name) continue;
+
+      // Skip bot-only DM spaces
+      if (dmSpace.singleUserBotDm === true) continue;
+
       try {
         const membersResponse = await chat.spaces.members.list({
           parent: dmSpace.name as string
@@ -128,50 +116,52 @@ export async function sendDMToUser(params: {
         );
 
         if (hasUser) {
-          spaceName = dmSpace.name as string;
-          console.log(`Found existing DM space with ${userEmail}: ${spaceName}`);
-          break;
+          return dmSpace.name as string;
         }
       } catch (memberError) {
-        console.log(`Could not check members for space ${dmSpace.name}, skipping`);
+        // Skip spaces we can't check
+        continue;
       }
     }
   } catch (listError) {
-    console.log('Could not list existing spaces, will try to create DM:', listError);
+    console.log(`Could not list spaces to find DM with ${userEmail}`);
   }
 
-  // If no existing space found, try to create one
-  if (!spaceName) {
-    try {
-      const dmResponse = await chat.spaces.setup({
-        requestBody: {
-          space: {
-            spaceType: 'DIRECT_MESSAGE'
-          },
-          memberships: [
-            {
-              member: {
-                name: `users/${userEmail}`,
-                type: 'HUMAN'
-              }
-            }
-          ]
-        }
-      });
+  return null;
+}
 
-      spaceName = (dmResponse.data as any).space?.name;
-    } catch (setupError: any) {
-      // If we can't create a DM, log and provide instructions
-      console.error(`Cannot send DM to ${userEmail}. Error: ${setupError.message}`);
-      console.log('To enable DMs, the user needs to message the bot first, or enable domain-wide delegation.');
-      console.log(`Pending tasks ID: ${pendingId} - User can access via the Chat bot.`);
-      throw setupError;
-    }
-  }
+/**
+ * Send task approval cards via DM to a user.
+ * The user must have messaged the bot at least once for this to work
+ * (Google Chat API limitation - bots cannot initiate DMs with service accounts).
+ *
+ * Returns true if DM was sent successfully, false if user hasn't messaged the bot yet.
+ */
+export async function sendDMToUser(params: {
+  userEmail: string;
+  pendingId: string;
+  tasks: ExtractedTaskWithConfig[];
+  meetingInfo: MeetingInfo;
+  folderName: string;
+  analysis?: MeetingAnalysis;
+  transcriptLink?: string;
+}): Promise<boolean> {
+  const chat = getChatClient();
+  const { userEmail, pendingId, tasks, meetingInfo, folderName, analysis, transcriptLink } = params;
+
+  // Find existing DM space (user must have messaged the bot first)
+  const spaceName = await findExistingDMSpace(userEmail);
 
   if (!spaceName) {
-    throw new Error(`Failed to create or find DM with user: ${userEmail}`);
+    // This is expected when the user hasn't messaged the bot yet — not an error
+    console.log(`No DM space with ${userEmail} — user needs to message the bot first. Pending ID: ${pendingId}`);
+    return false;
   }
+
+  console.log(`Found existing DM space with ${userEmail}: ${spaceName}`);
+
+  // Get ClickUp members for assignee dropdown
+  const members = await getWorkspaceMembers();
 
   // Build and send the card message
   const cardMessage = buildTaskApprovalMessage(
@@ -190,6 +180,7 @@ export async function sendDMToUser(params: {
   });
 
   console.log(`Sent approval cards via DM to: ${userEmail}`);
+  return true;
 }
 
 /**

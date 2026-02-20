@@ -1,10 +1,12 @@
 import type { Request, Response } from 'express';
 import {
   setupAllFolderWatchers,
-  renewExpiringWatchers
+  renewExpiringWatchers,
+  listRecentTranscripts,
+  isValidTranscript
 } from '../services/driveService.js';
 import { getAllFolderConfigs } from '../utils/folderConfigResolver.js';
-import { getEnvVar } from '../config/index.js';
+import { getEnvVar, getConfig } from '../config/index.js';
 
 /**
  * Cloud Function to set up or renew Drive watchers for all configured folders.
@@ -31,7 +33,13 @@ export async function setupDriveWatchers(
 
     console.log(`Setting up Drive watchers with webhook URL: ${webhookUrl}`);
 
-    if (mode === 'full') {
+    if (mode === 'reprocess') {
+      // Reprocess mode - scan folders for recent transcripts and publish to Pub/Sub
+      const days = parseInt(req.body?.days || req.query?.days || '7', 10);
+      console.log(`Reprocessing transcripts from the past ${days} days`);
+      const result = await reprocessRecentTranscripts(days);
+      res.json(result);
+    } else if (mode === 'full') {
       // Full setup - useful for initial deployment or after config changes
       console.log('Performing full watcher setup');
       await setupAllFolderWatchers(webhookUrl);
@@ -110,6 +118,80 @@ export async function driveWebhook(
 
   // Acknowledge the request after processing
   res.status(200).send('OK');
+}
+
+/**
+ * Reprocess recent transcripts from all folders.
+ * Scans each folder for valid transcripts created within the past N days
+ * and publishes them to Pub/Sub for processing.
+ */
+async function reprocessRecentTranscripts(days: number): Promise<object> {
+  const { PubSub } = await import('@google-cloud/pubsub');
+  const { isFileAlreadyProcessed } = await import('../services/firestoreService.js');
+
+  const config = getConfig();
+  const pubsub = new PubSub();
+  const topic = pubsub.topic(config.gcp.pubsubTopic);
+  const folders = getAllFolderConfigs();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  const results: Array<{ folder: string; file: string; status: string }> = [];
+  let published = 0;
+  let skipped = 0;
+
+  for (const folder of folders) {
+    console.log(`Scanning folder: ${folder.name} (${folder.id})`);
+
+    try {
+      const files = await listRecentTranscripts(folder.id, 50);
+
+      for (const file of files) {
+        const fileCreatedAt = new Date(file.createdTime);
+
+        if (fileCreatedAt < cutoff) {
+          continue; // Older than the requested window
+        }
+
+        if (!isValidTranscript(file)) {
+          results.push({ folder: folder.name, file: file.name, status: 'skipped (not transcript)' });
+          continue;
+        }
+
+        // Check if already processed
+        const alreadyProcessed = await isFileAlreadyProcessed(file.id);
+        if (alreadyProcessed) {
+          results.push({ folder: folder.name, file: file.name, status: 'skipped (already processed)' });
+          skipped++;
+          continue;
+        }
+
+        console.log(`Publishing: ${file.name} from ${folder.name}`);
+
+        await topic.publishMessage({
+          data: Buffer.from(JSON.stringify({ fileId: file.id, folderId: folder.id }))
+        });
+
+        results.push({ folder: folder.name, file: file.name, status: 'published' });
+        published++;
+
+        // Small delay to avoid overwhelming
+        await new Promise(r => setTimeout(r, 300));
+      }
+    } catch (error) {
+      console.error(`Error scanning folder ${folder.name}:`, error);
+      results.push({ folder: folder.name, file: '(error)', status: `error: ${error instanceof Error ? error.message : 'Unknown'}` });
+    }
+  }
+
+  console.log(`Reprocess complete: ${published} published, ${skipped} already processed`);
+
+  return {
+    success: true,
+    message: `Reprocessed past ${days} days: ${published} transcripts published, ${skipped} already processed`,
+    published,
+    skipped,
+    details: results
+  };
 }
 
 /**

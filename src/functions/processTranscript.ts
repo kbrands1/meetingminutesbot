@@ -184,9 +184,12 @@ export async function processTranscript(
   }
 
   // Send DMs to all users that should be notified
+  let dmsSent = 0;
+  const undelivered: string[] = [];
+
   for (const userEmail of usersToNotify) {
     try {
-      await sendDMToUser({
+      const sent = await sendDMToUser({
         userEmail,
         pendingId,
         tasks: tasksWithConfig,
@@ -195,9 +198,14 @@ export async function processTranscript(
         analysis,
         transcriptLink
       });
-      console.log(`Sent approval cards via DM to: ${userEmail}`);
+      if (sent) {
+        dmsSent++;
+      } else {
+        undelivered.push(userEmail);
+      }
     } catch (error) {
-      console.error(`Failed to send DM to ${userEmail}:`, error);
+      console.error(`Failed to send DM to ${userEmail}:`, error instanceof Error ? error.message : error);
+      undelivered.push(userEmail);
     }
   }
 
@@ -205,7 +213,11 @@ export async function processTranscript(
     console.warn(`No users to notify for file ${fileId}`);
   }
 
-  console.log(`Processed ${tasksWithConfig.length} tasks from ${folderConfig.name}, notified ${usersToNotify.size} users`);
+  if (undelivered.length > 0) {
+    console.log(`Could not DM ${undelivered.length} user(s): ${undelivered.join(', ')} — they need to message the bot first, then type /recent to see pending tasks.`);
+  }
+
+  console.log(`Processed ${tasksWithConfig.length} tasks from ${folderConfig.name}, DMs sent: ${dmsSent}/${usersToNotify.size}`);
 }
 
 /**
