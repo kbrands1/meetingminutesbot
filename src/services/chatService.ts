@@ -98,22 +98,24 @@ export async function findExistingDMSpace(userEmail: string): Promise<string | n
     });
 
     const allSpaces = (spacesResponse.data as any).spaces || [];
+    console.log(`Found ${allSpaces.length} DM spaces to search for ${userEmail}`);
 
     // Check each DM space's membership to find the one with the target user
+    // singleUserBotDm=true means a 1:1 DM between a human and the bot — these ARE the spaces we want
     for (const dmSpace of allSpaces) {
       if (!dmSpace.name) continue;
-
-      // Skip bot-only DM spaces
-      if (dmSpace.singleUserBotDm === true) continue;
 
       try {
         const membersResponse = await chat.spaces.members.list({
           parent: dmSpace.name as string
         });
 
-        const hasUser = ((membersResponse.data as any).memberships || []).some((m: any) =>
-          m.member?.name?.includes(userEmail) || m.member?.email === userEmail
-        );
+        const members = (membersResponse.data as any).memberships || [];
+        const hasUser = members.some((m: any) => {
+          const memberName = m.member?.name || '';
+          const memberEmail = m.member?.email || '';
+          return memberName.includes(userEmail) || memberEmail === userEmail;
+        });
 
         if (hasUser) {
           return dmSpace.name as string;
