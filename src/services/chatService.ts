@@ -84,49 +84,56 @@ export async function sendTaskApprovalCards(params: {
 }
 
 /**
+ * Cache a user's DM space mapping in Firestore.
+ * Called when a user messages the bot (from handleChatInteraction).
+ */
+export async function cacheDMSpace(userEmail: string, spaceName: string): Promise<void> {
+  const { Firestore } = await import('@google-cloud/firestore');
+  const firestore = new Firestore();
+  await firestore.collection('dm-spaces').doc(userEmail).set({
+    spaceName,
+    updatedAt: new Date()
+  }, { merge: true });
+}
+
+/**
  * Find an existing DM space with a user.
- * Returns the space name if found, null otherwise.
- * The bot can only find DM spaces where the user has previously messaged it.
+ * First checks the Firestore cache (populated when users message the bot),
+ * then falls back to spaces.findDirectMessage with numeric user ID.
  */
 export async function findExistingDMSpace(userEmail: string): Promise<string | null> {
-  const chat = getChatClient();
-
+  // 1. Check Firestore cache first (fast, reliable)
   try {
-    // List DM spaces the bot is part of
-    const spacesResponse = await chat.spaces.list({
-      filter: 'spaceType = "DIRECT_MESSAGE"'
-    });
-
-    const allSpaces = (spacesResponse.data as any).spaces || [];
-    console.log(`Found ${allSpaces.length} DM spaces to search for ${userEmail}`);
-
-    // Check each DM space's membership to find the one with the target user
-    // singleUserBotDm=true means a 1:1 DM between a human and the bot — these ARE the spaces we want
-    for (const dmSpace of allSpaces) {
-      if (!dmSpace.name) continue;
-
-      try {
-        const membersResponse = await chat.spaces.members.list({
-          parent: dmSpace.name as string
-        });
-
-        const members = (membersResponse.data as any).memberships || [];
-        const hasUser = members.some((m: any) => {
-          const memberName = m.member?.name || '';
-          const memberEmail = m.member?.email || '';
-          return memberName.includes(userEmail) || memberEmail === userEmail;
-        });
-
-        if (hasUser) {
-          return dmSpace.name as string;
-        }
-      } catch (memberError) {
-        // Skip spaces we can't check
-        continue;
+    const { Firestore } = await import('@google-cloud/firestore');
+    const firestore = new Firestore();
+    const doc = await firestore.collection('dm-spaces').doc(userEmail).get();
+    if (doc.exists) {
+      const spaceName = doc.data()?.spaceName;
+      if (spaceName) {
+        console.log(`Found cached DM space for ${userEmail}: ${spaceName}`);
+        return spaceName;
       }
     }
-  } catch (listError) {
-    console.log(`Could not list spaces to find DM with ${userEmail}`);
+  } catch (cacheError) {
+    console.log(`Could not check DM cache for ${userEmail}`);
+  }
+
+  // 2. Fallback: try findDirectMessage with email (only works with user auth, but try anyway)
+  const chat = getChatClient();
+  try {
+    const response = await chat.spaces.findDirectMessage({
+      name: `users/${userEmail}`
+    });
+    const spaceName = (response.data as any)?.name;
+    if (spaceName) {
+      // Cache it for next time
+      await cacheDMSpace(userEmail, spaceName).catch(() => {});
+      return spaceName;
+    }
+  } catch (error: any) {
+    if (error.code !== 404 && error.status !== 404) {
+      console.log(`findDirectMessage failed for ${userEmail}: ${error.message}`);
+    }
   }
 
   return null;
@@ -359,11 +366,15 @@ function buildTaskCard(
   });
 
   // Assignee dropdown
+  const suggestedAssigneeId = task.suggested_assignee
+    ? findMemberIdByName(task.suggested_assignee, members)
+    : '';
   const assigneeItems = [
-    { text: '-- Select Assignee --', value: '' },
+    { text: '-- Select Assignee --', value: '', selected: !suggestedAssigneeId },
     ...members.map(m => ({
       text: `${m.username} (${m.email})`,
-      value: m.id.toString()
+      value: m.id.toString(),
+      selected: m.id.toString() === suggestedAssigneeId
     }))
   ];
 
@@ -372,10 +383,7 @@ function buildTaskCard(
       label: 'Assignee',
       name: `assignee_${index}`,
       type: 'DROPDOWN',
-      items: assigneeItems,
-      ...(task.suggested_assignee && {
-        selectedValues: [findMemberIdByName(task.suggested_assignee, members)]
-      })
+      items: assigneeItems
     }
   });
 
@@ -398,12 +406,11 @@ function buildTaskCard(
       name: `priority_${index}`,
       type: 'DROPDOWN',
       items: [
-        { text: `${PRIORITY_DISPLAY.urgent.emoji} Urgent`, value: 'urgent' },
-        { text: `${PRIORITY_DISPLAY.high.emoji} High`, value: 'high' },
-        { text: `${PRIORITY_DISPLAY.normal.emoji} Normal`, value: 'normal' },
-        { text: `${PRIORITY_DISPLAY.low.emoji} Low`, value: 'low' }
-      ],
-      selectedValues: [task.priority]
+        { text: `${PRIORITY_DISPLAY.urgent.emoji} Urgent`, value: 'urgent', selected: task.priority === 'urgent' },
+        { text: `${PRIORITY_DISPLAY.high.emoji} High`, value: 'high', selected: task.priority === 'high' },
+        { text: `${PRIORITY_DISPLAY.normal.emoji} Normal`, value: 'normal', selected: task.priority === 'normal' },
+        { text: `${PRIORITY_DISPLAY.low.emoji} Low`, value: 'low', selected: task.priority === 'low' }
+      ]
     }
   });
 

@@ -9,6 +9,7 @@ import {
   getPendingTasksStats
 } from '../services/firestoreService.js';
 import { createTask, getListDetails } from '../services/clickupService.js';
+import { cacheDMSpace } from '../services/chatService.js';
 import { getAllFolderConfigs } from '../utils/folderConfigResolver.js';
 import { getChatFunctionUrl } from '../config/index.js';
 import type { ChatCardInteraction, TaskPriority } from '../types/index.js';
@@ -126,6 +127,13 @@ async function handleAddedToSpace(
   event: ChatCardInteraction,
   res: Response
 ): Promise<void> {
+  // Cache the DM space mapping
+  const userEmail = event.user?.email || '';
+  const spaceName = event.space?.name || '';
+  if (userEmail && spaceName) {
+    cacheDMSpace(userEmail, spaceName).catch(() => {});
+  }
+
   const welcomeMessage = {
     text: `👋 Hello! I'm the Meeting Task Bot.\n\nI monitor meeting transcripts in configured Google Drive folders and extract tasks for you to review.\n\nWhen tasks are found, I'll send you approval cards where you can:\n• Edit task details\n• Assign team members\n• Set due dates and priorities\n• Create tasks in ClickUp with one click\n\nI'll start monitoring transcripts automatically!`
   };
@@ -143,6 +151,12 @@ async function handleMessage(
 ): Promise<void> {
   const messageText = event.message?.text?.toLowerCase() || '';
   const userEmail = event.user?.email || '';
+  const spaceName = event.space?.name || '';
+
+  // Cache the user's DM space so processTranscript can send them proactive DMs
+  if (userEmail && spaceName) {
+    cacheDMSpace(userEmail, spaceName).catch(() => {});
+  }
 
   if (messageText.includes('help')) {
     res.setHeader('Content-Type', 'application/json');
